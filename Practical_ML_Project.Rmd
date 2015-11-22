@@ -252,7 +252,7 @@ getTrainControl <- function(numbers){
 
 ```
 
-We are going to train 4 Gradient Boosted Machine and 4 Random Forst.
+We are going to train 4 Gradient Boosted Machine and 4 Random Forest.
 Each model will be trained with a different a combination of cross validation and pre-processing. So for each model we are going to try:
 
 * 3 folds, no pre-processing
@@ -360,7 +360,7 @@ rf10error <- signif(1 - as.numeric(confusionMatrix(testing$classe, predict(rf10[
 
 ## Conclusion
 
-Random Forest produced consistently an estimated accuracy of above 0.99, the smaller estimated *out of sample error* was produced by the 10 folds cross validation with no pre-processing, with an *out of sample error* of ```r rf10error```
+Random Forest consistently produced  an estimated accuracy of above 0.99, the smaller estimated *out of sample error* was produced by the 10 folds cross validation with no pre-processing, with an *out of sample error* of ```r rf10error```
 
 However while Random Forest estimate a higher accuracy and a smaller out of sample error they took more than double the time to train when compared to Gradient Boosted Machine.
 
@@ -389,7 +389,14 @@ prf10cs
 
 ```
 
-Despite a different estimated *out of sample error*, all 8 models agree on the classification on the test dataset. Let's conclude with writing to a file our final classification.
+Despite a different estimated *out of sample error*, all 8 models agree on the classification on the test dataset. 
+
+To conclude both models performed quite well, however Random Forest has a much smaller *out of sample error*. 
+Also from this analysis it seems that centering and scaling did not improve accuracy but instead added a computation overhead while training both models.
+
+Random Forest seems to be a very powerful algorithm regardless of its pre-preocess or cross validation settings.
+
+Let's conclude by picking the model with the lowest estimated *out of sample error*, the Random Forest with 10 folds cross validation, and let's write to a file our final classification.
 
 
 
