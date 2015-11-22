@@ -1,0 +1,425 @@
+---
+title: "Practical Machine Learning Project"
+author: "Giuseppe Romagnuolo"
+date: "9 November 2015"
+output: html_document
+---
+## Introduction
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+In this project, we are going to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. The participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+We are going to compare various machine learning algorithm to predict the type of exercise
+
+[groupware]: http://groupware.les.inf.puc-rio.br/har
+
+
+## About the dataset
+
+The data for this project comes from [Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements] [groupware-pub] study. The authors have kindly made their dataset public, we are going to download the training and test dataset.
+
+[groupware-pub]: http://groupware.les.inf.puc-rio.br/work.jsf?p1=10335#ixzz3sDmyNLTM
+
+```{r cache=TRUE, warning= FALSE}
+library(RCurl); library(caret); library(doParallel);
+# settings used to avoid problem on Windows OS when using RCurl to load files 
+# over the https protocol
+options(RCurlOptions = list(cainfo = system.file("CurlSSL", "cacert.pem", package = "RCurl")))
+
+trainUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+rawTrainingData <- read.csv(text = getURL(trainUrl), header = T, na.strings = c("NA", ""))
+testData <- read.csv(text = getURL(testUrl), header = T, na.strings = c("NA", ""))
+
+```
+
+## Exploratory analysis
+
+The training dataset comes with ```r dim(rawTrainingData)[1] ``` observations and  ```r dim(rawTrainingData)[2] ``` variables. First let's glance over the data structure to see if we can infer what variables are certainly not useful predictors.
+
+```{r}
+str(rawTrainingData)
+```
+
+
+### Data cleaning
+
+We notice that there are several variables that will not make good predictors, e.g. user_name, raw_timestamp_part_1, num_window etc.
+
+Also the dataset seem to have various Factor variables that in effect contain numerical measurements, a first step of the cleaning process is to convert those to numeric data type. 
+
+```{r cache=T, warning= F}
+
+# Helper functions
+#-----------------
+
+# Helper functions to convert factors to numeric
+# See: http://stackoverflow.com/questions/8596466/r-change-all-columns-of-type-factor-to-numeric
+asNumeric <- function(x) as.numeric(as.character(x))
+factorsNumeric <- function(d) modifyList(d, lapply(d[, sapply(d, is.factor)], asNumeric))
+
+# returns names of variables that have a proportion of NAs below the threshold 
+# (threshold between {0,1})
+getVarNamesWhereNaLessThan <- function(d, threshold) {
+        names( which(sapply(d, function(x){ sum(is.na(x)) / length(x)} ) < threshold) )
+}
+
+# Data cleaning
+#----------------
+
+trainingData <- rawTrainingData
+
+# List of variable names that are not a predictor
+nonPredictors <- c("user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", 
+                     "new_window", "num_window", "classe", "X")
+
+# Removing non-predictors variables
+trainingData <- trainingData[, -which(names(trainingData) %in% nonPredictors)]
+
+# converting factors to numeric variables,
+# NAs will be introduced by coercion
+trainingData  <- factorsNumeric(trainingData)
+
+goodPredictors <- getVarNamesWhereNaLessThan(trainingData, 0.25)
+
+
+```
+
+Many measurements contain a high number of NA's, pre processing techniques like `kNNImpute` have not much value if the number of measurements for a given variable is very sparse. We are therefore going to select only those predictor variables where the percentage of NA's is less than `25%`. We end up with ```r length(goodPredictors) ``` good predictors listed below.
+
+```{r}
+goodPredictors
+
+```
+
+```{r cache=T, warning=F}
+# after converting factors to variables reapplying the removal of variables 
+# that have more than half of its values as NAs
+trainingData <- trainingData[, goodPredictors]
+
+# re-adding the Classe outcome to the cleaned trainingData
+trainingData$classe <- rawTrainingData$classe
+
+dim(trainingData)
+
+```
+
+Of the remaining predictors none contain NA's.
+
+```{r}
+# Show any variable that contains more than one NA.
+names(trainingData)[which(names(trainingData) %in% colSums(sapply(trainingData, is.na)) > 0)]
+
+```
+
+Lastly let's explore the variance of the predictors, if any has near zero variance.
+
+```{r cache=T}
+
+ nearZeroVar(trainingData, saveMetrics=T)
+
+```
+
+## Model training
+
+Having cleaned the data we can start to train a few models and compare the out of sample error rate.
+
+### Partitioning
+
+First let's partition the training data into a test and training set so that we can use our training data to measure our algorithm performance before we predict the final test set which we will do only one.
+
+
+```{r cache=TRUE}
+
+# Partitioning for testing
+# ------------------------
+set.seed(12345)
+
+inTr <- createDataPartition(trainingData$classe, p=0.60, list=F)
+
+training <- trainingData[inTr,]
+testing <- trainingData[-inTr,]
+
+
+```
+
+### Parallel computing
+
+Learning algorithms like Random Forest are computationally expensive, we can take advantage of modern multicore processors to speed up the training. In order to ensure reproducibility we have to set the seed for all the iteration that the cores will take. The `setSeed` function takes care of generating a list of seeds for the different cross validations iterations.
+
+Please note that the `setSeed` function was borrowed from a GitHub post of [Jaehyeon Kim] [journey-git] 
+
+[journey-git]:http://jaehyeon-kim.github.io/r/2015/05/30/Setup-Random-Seeds-on-Caret-Package/
+
+```{r}
+
+# Parallel computing setup
+# ------------------------
+
+# We are going to use all cores to train our model
+# Generally, to ensure reproducibility set.seed(1234) is enough
+# however with parallel processing we have to set a seed for 
+# the all the iteration that the cores will take
+# see http://goo.gl/N7np4V
+
+# helper function to generate seeds for parallel 
+# (borrowed from http://goo.gl/qHD2ia)
+setSeeds <- function(method = "cv", numbers = 1, repeats = 1, tunes = NULL, seed = 1237) {
+        #B is the number of resamples and integer vector of M (numbers + tune length if any)
+        B <- if (method == "cv") numbers
+        else if(method == "repeatedcv") numbers * repeats
+        else NULL
+  
+        if(is.null(length)) {
+                seeds <- NULL
+        } else {
+                set.seed(seed = seed)
+                seeds <- vector(mode = "list", length = B)
+                seeds <- lapply(seeds, 
+                        function(x) { 
+                                sample.int(n = 1000000, size = numbers + ifelse(is.null(tunes), 0, tunes))
+                        }
+                )
+                 seeds[[length(seeds) + 1]] <- sample.int(n = 1000000, size = 1)
+        }
+        # return seeds
+        seeds
+}
+```
+
+The train function is wrapped by a helper function that takes care of initialising and stopping parallel computing. Also note that the training execution time is measured by the `system.time`.
+We can use the time alongside the out of sample error to evaluate the best model.
+
+```{r}
+
+# creating a helper function that performs our training
+# and returns the model and the time it took
+myTrain <- function(method, preProcess = NULL, trainControl){
+        
+        # run training on all cores but one so to avoid 
+        # the machine to become unresponsive during training
+        # see also http://goo.gl/N7np4V
+        cores <- detectCores(); cores <- ifelse(cores == 1, cores, (cores - 1));
+
+        # init parallel processing
+        # ------------------------
+        cl <- makeCluster(cores); registerDoParallel(cl);
+        
+        # time
+        t <- system.time( 
+                # model
+                m <- train( classe ~., 
+                            data=training, 
+                            method=method, 
+                            trControl = trainControl,
+                            verbose = F,
+                            preProcess = preProcess)
+        )
+        
+        #stop parallel processing
+        # ------------------------
+        stopCluster(cl)
+        
+        # return the trained model and time
+        list(m, t)
+}
+
+```
+
+###Cross validation
+
+We are going to perform K Fold Cross Validation, the following `getTrainControl` function initialises a `trainControl` which will be passed as a parameter to the Caret's `train` function. The `train` function is very handy and it will performs cross validation as part of the training. The type of cross validation can be controlled by the `trControl` property. We are going to perform K Fold Cross Validation but we will evaludate 3 and 10 folds. Larger K's tend to have less bias but more variance, while smaller K's have more bias but less variance.
+
+```{r}
+
+# creates a train control with the passed number of folds
+getTrainControl <- function(numbers){
+        seed <- 12345
+        # initialising the seeds
+        cvSeeds <- setSeeds(method = "cv", numbers = numbers, seed = seed)
+
+        # setting up our train control, 
+        # we use cross validation
+        # cross validation
+        cvCtrl <- trainControl(method = "cv", number = numbers, 
+                               classProbs = TRUE,
+                               savePredictions = TRUE,
+                               seeds = cvSeeds)
+        
+        cvCtrl
+}
+
+
+```
+
+We are going to train 4 Gradient Boosted Machine and 4 Random Forst.
+Each model will be trained with a different a combination of cross validation and pre-processing. So for each model we are going to try:
+
+* 3 folds, no pre-processing
+* 3 folds with centering and scaling
+* 10 folds, no pre-processing
+* 10 folds, with centering and scaling
+
+### Gradient Boosted Machine
+
+#### 3 folds, no pre-processing
+
+```{r cache=T, warning=F}
+gb3 <- myTrain("gbm", NULL, getTrainControl(3))
+```
+
+#### 3 folds with centering and scaling
+
+```{r cache=T, warning=F}
+gb3cs <- myTrain("gbm", c("center", "scale"), getTrainControl(3))
+```
+
+#### 10 folds, no pre-processing
+
+```{r cache=T, warning=F}
+gb10 <- myTrain("gbm", NULL, getTrainControl(10))
+```
+
+#### 10 folds, with centering and scaling
+
+```{r cache=T, warning=F}
+gb10cs <- myTrain("gbm", c("center", "scale"), getTrainControl(10))
+
+```
+
+##Random Forest
+
+#### 3 folds, no pre-processing
+
+```{r cache=T, warning=F}
+rf3 <- myTrain("rf", NULL, getTrainControl(3))
+```
+
+#### 3 folds with centering and scaling
+
+```{r cache=T, warning=F}
+rf3cs <- myTrain("rf", c("center", "scale"), getTrainControl(3))
+```
+
+#### 10 folds, no pre-processing
+
+```{r cache=T, warning=F}
+rf10 <- myTrain("rf", NULL, getTrainControl(10))
+```
+
+#### 10 folds, with centering and scaling
+
+```{r cache=T, warning=F}
+rf10cs <- myTrain("rf", c("center", "scale"), getTrainControl(10))
+
+```
+
+### Models comparison
+
+First thing we will notice is the time each model took to train, Gradient Boosted Machine is much faster to train than Random Forest although has a higher accuracy and therefore a lower *out of sample error*.
+
+### Gradient Boosted Machine time and accuracy
+
+```{r, message=F}
+library(caret)
+
+gb3[[2]]
+confusionMatrix(testing$classe, predict(gb3[[1]], testing))$overall["Accuracy"]
+
+gb3cs[[2]]
+confusionMatrix(testing$classe, predict(gb3cs[[1]], testing))$overall["Accuracy"]
+
+gb10[[2]]
+confusionMatrix(testing$classe, predict(gb10[[1]], testing))$overall["Accuracy"]
+
+gb10cs[[2]]
+confusionMatrix(testing$classe, predict(gb10cs[[1]], testing))$overall["Accuracy"]
+
+```
+
+#Random Forest time and accuracy
+
+```{r, message=F}
+
+
+rf3[[2]]
+confusionMatrix(testing$classe, predict(rf3[[1]], testing))$overall["Accuracy"]
+
+rf3cs[[2]]
+confusionMatrix(testing$classe, predict(rf3cs[[1]], testing))$overall["Accuracy"]
+
+rf10[[2]]
+confusionMatrix(testing$classe, predict(rf10[[1]], testing))$overall["Accuracy"]
+
+rf10cs[[2]]
+confusionMatrix(testing$classe, predict(rf10cs[[1]], testing))$overall["Accuracy"]
+
+rf10error <- signif(1 - as.numeric(confusionMatrix(testing$classe, predict(rf10[[1]], testing))$overall["Accuracy"]), digits = 3)
+
+```
+
+## Conclusion
+
+Random Forest produced consistently an estimated accuracy of above 0.99, the smaller estimated *out of sample error* was produced by the 10 folds cross validation with no pre-processing, with an *out of sample error* of ```r rf10error```
+
+However while Random Forest estimate a higher accuracy and a smaller out of sample error they took more than double the time to train when compared to Gradient Boosted Machine.
+
+Let's do a final prediction using our models to predict the `classe` of our provided test dataset.
+
+```{r}
+pgb3 <- predict(gb3[[1]], testData)
+pgb3cs <- predict(gb3cs[[1]], testData)
+pgb10 <- predict(gb10[[1]], testData)
+pg10cs <- predict(gb10cs[[1]], testData)
+prf3 <- predict(rf3[[1]], testData)
+prf3cs <- predict(rf3cs[[1]], testData)
+prf10 <- predict(rf10[[1]], testData)
+prf10cs <- predict(rf10cs[[1]], testData)
+
+pgb3
+pgb3cs
+pgb10
+pg10cs
+prf3
+prf3cs
+prf10
+prf10cs
+
+
+
+```
+
+Despite a different estimated *out of sample error*, all 8 models agree on the classification on the test dataset. Let's conclude with writing to a file our final classification.
+
+
+
+```{r}
+
+
+predictionsToFile = function(x){
+        
+        outputDir = paste0(getwd(),"/answers")
+
+        if(!dir.exists(outputDir)) dir.create(outputDir)
+        
+        n = length(x)
+        for(i in 1:n){
+                filename = paste0(outputDir,"/problem_id_",i,".txt")
+                write.table(as.character(x[i]),file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+         }
+}
+
+
+predictionsToFile(prf10)
+
+
+```
+
+##Disclaimer
+This analysis was done as a course project for the 'Practical Machine Learning' course which is part of the [Data Science Specialisation][dss] provided by [Johns Hopkins Bloomberg School of Public Health][jhsph] via [Coursera][co].
+
+
+[dss]: https://www.coursera.org/specialization/jhudatascience/1
+[jhsph]: http://www.jhsph.edu/
+[co]: https://www.coursera.org/
+[mtdesc]:https://stat.ethz.ch/R-manual/R-devel/library/datasets/html/mtcars.html
