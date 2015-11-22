@@ -535,7 +535,7 @@ gb3[[2]]</code></pre>
 <pre class="r"><code>rf10error &lt;- signif(1 - as.numeric(confusionMatrix(testing$classe, predict(rf10[[1]], testing))$overall[&quot;Accuracy&quot;]), digits = 3)</code></pre>
 <div id="conclusion" class="section level2">
 <h2>Conclusion</h2>
-<p>Random Forest produced consistently an estimated accuracy of above 0.99, the smaller estimated <em>out of sample error</em> was produced by the 10 folds cross validation with no pre-processing, with an <em>out of sample error</em> of <code>0.00625</code></p>
+<p>Random Forest consistently produced an estimated accuracy of above 0.99, the smaller estimated <em>out of sample error</em> was produced by the 10 folds cross validation with no pre-processing, with an <em>out of sample error</em> of <code>0.00625</code></p>
 <p>However while Random Forest estimate a higher accuracy and a smaller out of sample error they took more than double the time to train when compared to Gradient Boosted Machine.</p>
 <p>Let’s do a final prediction using our models to predict the <code>classe</code> of our provided test dataset.</p>
 <pre class="r"><code>pgb3 &lt;- predict(gb3[[1]], testData)
@@ -571,7 +571,10 @@ pgb3</code></pre>
 <pre class="r"><code>prf10cs</code></pre>
 <pre><code>##  [1] B A B A A E D B A A B C B A E E A B B B
 ## Levels: A B C D E</code></pre>
-<p>Despite a different estimated <em>out of sample error</em>, all 8 models agree on the classification on the test dataset. Let’s conclude with writing to a file our final classification.</p>
+<p>Despite a different estimated <em>out of sample error</em>, all 8 models agree on the classification on the test dataset.</p>
+<p>To conclude both models performed quite well, however Random Forest has a much smaller <em>out of sample error</em>. Also from this analysis it seems that centering and scaling did not improve accuracy but instead added a computation overhead while training both models.</p>
+<p>Random Forest seems to be a very powerful algorithm regardless of its pre-preocess or cross validation settings.</p>
+<p>Let’s conclude by picking the model with the lowest estimated <em>out of sample error</em>, the Random Forest with 10 folds cross validation, and let’s write to a file our final classification.</p>
 <pre class="r"><code>predictionsToFile = function(x){
         
         outputDir = paste0(getwd(),&quot;/answers&quot;)
